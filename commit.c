@@ -25,7 +25,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-// Forward declarations (implemented in object.c)
+// Implemented in object.c
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out);
 
@@ -112,9 +112,16 @@ int commit_walk(commit_walk_fn callback, void *ctx) {
         size_t raw_len;
         if (object_read(&id, &type, &raw, &raw_len) != 0) return -1;
 
+        char *text = realloc(raw, raw_len + 1);
+        if (!text) {
+            free(raw);
+            return -1;
+        }
+        text[raw_len] = '\0';
+
         Commit c;
-        int rc = commit_parse(raw, raw_len, &c);
-        free(raw);
+        int rc = commit_parse(text, raw_len, &c);
+        free(text);
         if (rc != 0) return -1;
 
         callback(&id, &c, ctx);
@@ -193,9 +200,71 @@ int head_update(const ObjectID *new_commit) {
 //   - head_update       : moves the branch pointer to your new commit
 //
 // Returns 0 on success, -1 on error.
+
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    // TODO: Implement commit creation
-    // (See Lab Appendix for logical steps)
-    (void)message; (void)commit_id_out;
-    return -1;
+    ObjectID tree_id;
+
+    // 1. Build tree from index
+    if (tree_from_index(&tree_id) != 0) {
+        fprintf(stderr, "error: failed to build tree\n");
+        return -1;
+    }
+
+    Commit c;
+    memset(&c, 0, sizeof(c));
+
+    // 2. Set tree
+    c.tree = tree_id;
+
+    // 3. Read parent (if exists)
+    if (head_read(&c.parent) == 0) {
+        c.has_parent = 1;
+    } else {
+        c.has_parent = 0;
+    }
+
+    // 4. Author + timestamp
+    snprintf(c.author, sizeof(c.author), "%s", pes_author());
+    c.timestamp = (uint64_t)time(NULL);
+
+    // 5. Commit message
+    snprintf(c.message, sizeof(c.message), "%s", message);
+
+    // 6. Serialize commit
+    void *raw = NULL;
+    size_t raw_len = 0;
+
+    if (commit_serialize(&c, &raw, &raw_len) != 0) {
+        fprintf(stderr, "error: failed to serialize commit\n");
+        return -1;
+    }
+
+    // 7. Write commit object
+    ObjectID commit_id;
+    if (object_write(OBJ_COMMIT, raw, raw_len, &commit_id) != 0) {
+        fprintf(stderr, "error: failed to write commit object\n");
+        free(raw);
+        return -1;
+    }
+
+    free(raw);
+
+    // 8. Update HEAD
+    if (head_update(&commit_id) != 0) {
+        fprintf(stderr, "error: failed to update HEAD\n");
+        return -1;
+    }
+
+    // 9. Output commit id
+    if (commit_id_out) {
+        *commit_id_out = commit_id;
+    }
+
+    // 10. Print success
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(&commit_id, hex);
+    printf("Committed as %s\n", hex);
+
+    return 0;
 }
+
